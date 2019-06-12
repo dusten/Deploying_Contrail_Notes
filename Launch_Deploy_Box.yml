@@ -1,0 +1,922 @@
+---
+- hosts: local
+# Select Instance Type to Use
+  vars_prompt:
+  - name: ec2_type
+    prompt: "Which Type of Instance to deploy?\n
+     1- t3.medium\n
+     2- t3.large\n
+     3- t3.xlarge\n"
+    private:               "no"
+    default:               "1"
+
+  - name: ebsopt
+    prompt: "Do you want to use an EBS optimized Instance?\n
+     0- No \n
+     1- Yes \n"
+    private:               "no"
+    default:               "0"
+
+  pre_tasks:
+  - name: Set Instance Type
+    set_fact:
+      contrail_ec2_type:     "t3.medium"
+    when:  'ec2_type == "1"'
+
+  - set_fact:
+      contrail_ec2_type:     "t3.large"
+    when:  'ec2_type == "2"'
+
+  - set_fact:
+      contrail_ec2_type:     "t3.xlarge"
+    when:  'ec2_type == "3"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "4"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "5"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "6"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "7"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "8"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "9"'
+
+  - set_fact:
+      contrail_ec2_type:     ""
+    when:  'ec2_type == "10"'
+
+  - set_fact:
+      contrail_ec2_type:     "t3.medium"
+    when:  'ec2_type == "0"'
+
+  - set_fact:
+      ebs_opt:     "no"
+    when:  'ebsopt == "0"'
+
+  - set_fact:
+      ebs_opt:     "yes"
+    when:  'ebsopt == "1"'
+
+  - name: Find Public IP Address For SG
+    ipify_facts:
+    register: pub_ip
+
+  - name: Setting Public IP to usable variable
+    set_fact:
+      my_ip:                "{{ pub_ip.ansible_facts.ipify_public_ip }}"
+
+  - set_fact:
+      aws_access_key:             "" 
+      aws_secret_key:             ""
+      aws_region:                 ""
+      aws_bucket:                 ""
+      jnpr_access_key:            ""
+      jnpr_secret_key:            ""
+      jnpr_container_registry:    "hub.juniper.net/contrail"
+      contrail_version_tag:       "5.1.0-0.38"
+
+    #SSH keys AWS 
+      ssh_keyname:                "contrail_deploy"
+    # Owner Name
+      owner:                      "dsplan"
+    # Special
+      used_for:                   "deploy_contrail"
+    # AWS Environment Tag
+      env:                        "ContrailDeploy"
+    # VPC for Contrail Deploy Information
+      vpc_name:                 "Contrail_Deploy"
+      vpc_cidr:                 "10.1.0.0/16"
+      vpc_zone:                 "10.1.in-addr.arpa"
+      vpc_subnet:
+      - { az:                   "a",
+          subnet:               "10.1.1.0/24",
+          interface:            "generic" }
+      - { az:                   "b",
+          subnet:               "10.1.2.0/24",
+          interface:            "generic" }
+      - { az:                   "c",
+          subnet:               "10.1.3.0/24",
+          interface:            "generic" }
+      - { az:                   "d",
+          subnet:               "10.1.4.0/24",
+          interface:            "generic" }
+      - { az:                   "e",
+          subnet:               "10.1.5.0/24",
+          interface:            "generic" }
+      - { az:                   "f",
+          subnet:               "10.1.6.0/24",
+          interface:            "generic" }
+
+# Contrail HOST
+      Contrail_Name:                "Contrail_Deploy"
+# What AMI do you want to use for Contrail?
+      contrail_ami_base:              "CentOS Linux 7 x86_64 HVM EBS ENA 1901_01*"
+      contrail_ami_owner:             "679593333241"
+      contrail_user:                  "centos"
+      volumes_contrail:
+      - device_name:            "/dev/sda1"
+        volume_type:            "gp2"
+        volume_size:            "10"
+        delete_on_termination:  "true"
+
+  tasks:
+  - name: Reset Inventory File
+    copy:
+      content: |
+                [local]
+                localhost ansible_connection=local
+
+                [SRX]
+
+                [jsa]
+
+                [contrail_controller]
+
+                [appformix_controller]
+
+                [vpchosts]
+
+                [vSRX]
+                
+                [contrail_deploy]
+      dest: inventory
+
+  - name: Setup AWS CLI (1/3)
+    shell: >
+      aws configure set aws_access_key_id "{{ aws_access_key }}"
+
+  - name: Setup AWS CLI (2/3)
+    shell: >
+      aws configure set aws_secret_access_key "{{ aws_secret_key }}"
+
+  - name: Setup AWS CLI (3/3)
+    shell: >
+      aws configure set region "{{ aws_region }}"
+
+  - name: SSH Creating Key Pair
+    ec2_key:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      name:                 "{{ ssh_keyname }}_{{ aws_region }}_key"
+    register: ec2_key
+
+  - name: Saving EC2 key to local directory
+    copy:
+      content:              "{{ ec2_key.key.private_key }}"
+      dest:                 "./{{ ssh_keyname }}_{{ aws_region }}_key.pem"
+      mode:                 0600
+    when: ec2_key.changed
+
+# Get Spot Price in Each Region for Instance Type
+  - name: Get Spot
+    shell: >
+      aws configure set region "{{ aws_region }}" && aws ec2 describe-spot-price-history --instance-types "{{ contrail_ec2_type }}" --product-description "Linux/UNIX (Amazon VPC)" --start-time {{ ansible_date_time.iso8601 }}  --end-time {{ ansible_date_time.iso8601 }}
+    register: spot
+
+# Find lowest spot price Region
+  - name: Set Contrail Deploy Region
+    set_fact:
+      contrail_az:            "{{ ((spot.stdout | from_json).SpotPriceHistory | sort(attribute='SpotPrice'))[0].AvailabilityZone[-1] }}"
+      contrail_spot:          "{{ ((spot.stdout | from_json).SpotPriceHistory | sort(attribute='SpotPrice'))[0].SpotPrice }}"
+
+# Create VPC and IGW in Region
+  - name: Create {{ vpc_name }} with {{ vpc_cidr }}
+    ec2_vpc_net:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      name:                 "{{ vpc_name }}"
+      cidr_block:           "{{ vpc_cidr }}"
+      resource_tags:
+        Environment:        "{{ env }}"
+        Owner:              "{{ owner }}"
+        Used_for:           "{{ used_for }}"
+      state:                "present"
+    register: VPC
+
+  - name: Set VPC ID - {{ VPC.vpc.id }} in variable
+    set_fact:
+      VPC_id:               "{{ VPC.vpc.id }}"
+
+  - name: Set DHCP Options
+    ec2_vpc_dhcp_option:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      dns_servers:
+          - 169.254.169.253
+      ntp_servers:
+          - 169.254.169.123
+      vpc_id:               "{{ VPC_id }}"
+      delete_old:           "True"
+      inherit_existing:     "False"
+
+  - name: Create IGW for {{ vpc_name }}
+    ec2_vpc_igw:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      vpc_id:               "{{ VPC_id }}"
+      state:                "present"
+    register: VPC_igw
+
+  - name: Set Internet Gateway ID - {{ VPC_igw.gateway_id }} in variable
+    set_fact:
+      VPC_igw_id:           "{{ VPC_igw.gateway_id }}"
+
+  - name: Tagging IGW resource with {{ vpc_name }}_igw tag
+    ec2_tag:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      resource:             "{{ VPC_igw_id }}"
+      state:                "present"
+      tags:
+        Name:               "{{ vpc_name }}_igw"
+        Environment:        "{{ env }}"
+        Owner:              "{{ owner }}"
+        Used_for:           "{{ used_for }}"
+
+# Create Subnet for Region
+  - name: Create {{ vpc_name }} Subnet
+    ec2_vpc_subnet:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      vpc_id:               "{{ VPC_id }}"
+      cidr:                 "{{ item.subnet }}"
+      az:                   "{{ aws_region }}{{ item.az }}"
+      state:                "present"
+      resource_tags:
+        Name:               "{{ vpc_name }}_{{ item.az }}_{{ item.interface }}"
+        Environment:        "{{ env }}"
+        Owner:              "{{ owner }}"
+        Used_for:           "{{ used_for }}"
+        Interface:          "{{ item.interface }}"
+    with_items: "{{ vpc_subnet }}"
+    register: VPC_subnets
+    when: 'item.az == contrail_az'
+
+  - name: Append returned to list subnet_ids
+    set_fact:
+      VPC_subnet_ids:       "{{ (VPC_subnet_ids | default([])) + [ item.subnet.id ] }}"
+    with_items: "{{ VPC_subnets.results }}"
+    when: 'item.subnet is defined'
+
+  - name: Set up {{ vpc_name }} route table
+    ec2_vpc_route_table:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      vpc_id:               "{{ VPC_id }}"
+      tags:
+        Name:               "{{ vpc_name }}"
+        Environment:        "{{ env }}"
+        Owner:              "{{ owner }}"
+        Used_for:           "{{ used_for }}"
+      subnets:
+        "{{ VPC_subnet_ids }}"
+      routes:
+        - dest:           "0.0.0.0/0"
+          gateway_id:     "{{ VPC_igw_id }}"
+
+# Create Security Group for Region
+  - name: Get Security Contrail Group ID
+    ec2_group:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      name:                 "{{ vpc_name }}_ext_sg"
+      description:          "{{ vpc_name }} External SSH Access"
+      vpc_id:               "{{ VPC_id }}"
+    register: ec2_sg
+  
+  - name: Set VPC U SG ID
+    set_fact:
+      VPC_sg_id:          "{{ ec2_sg.group_id }}"
+
+  - name: Update Main Security Group U
+    ec2_group:
+      name:                 "{{ vpc_name }}_ext_sg"
+      description:          "{{ vpc_name }} External SSH Access"
+      vpc_id:               "{{ VPC_id }}"
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      rules:
+      - proto:              "all"
+        cidr_ip:            "{{ my_ip }}/32"
+
+  - name: Tagging Security Group with Environment
+    ec2_tag:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      resource:             "{{ VPC_sg_id }}"
+      state:                "present"
+      tags:
+        Environment:        "{{ env }}"
+        Name:               "{{ vpc_name }}_ext_sg"
+        Owner:              "{{ owner }}"
+        Used_for:           "{{ used_for }}"
+
+# Find AMI ID
+  - name: Search for all of the AMIs in {{ aws_region }} which match {{ contrail_ami_base }}
+    ec2_ami_facts:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      filters:
+        name:               "{{ contrail_ami_base }}"
+        owner-id:           "{{ contrail_ami_owner }}"
+    register: amifind
+
+  - name: Set contrail_ami for use of Contrail Contrail 
+    set_fact:
+      contrail_ami:         "{{ amifind.images[0].image_id }}" 
+
+  - name: Confirm Instance Launch
+    pause:
+      prompt: "Starting Instance in {{ aws_region }} for {{ ((contrail_spot|float * 1.1) | round(5,'ceil')) }}."
+      seconds: 10
+
+# Launch Spot Instance
+  - name: Launching Contrail Deployer Instance
+    ec2:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      spot_price:           "{{ ((contrail_spot|float * 1.1) | round(5,'ceil')) }}"
+      spot_type:            "one-time"
+      spot_launch_group:    "contrail_{{ contrail_az }}"
+      instance_type:        "{{ contrail_ec2_type }}"
+      image:                "{{ contrail_ami }}"
+      keypair:              "{{ ssh_keyname }}_{{ aws_region }}_key"
+      count:                1
+      vpc_subnet_id:        "{{ VPC_subnet_ids[0] }}"
+      group_id:             "{{ VPC_sg_id }}"
+      ebs_optimized:        "{{ ebs_opt }}"
+      volumes:              "{{ volumes_contrail }}"
+      assign_public_ip:     "yes"
+      wait:                 "yes"
+      instance_tags:
+        Name:               "{{ Contrail_Name }}"
+        Environment:        "{{ env }}"
+        Owner:              "{{ owner }}"
+        Used_for:           "{{ used_for }}"
+    register: contrail_instances
+
+  - name: Instance IDs for Contrail
+    set_fact:
+      contrail_host:
+      - name:               "{{ contrail_instances.instances[0].tags.Name }}"
+        id:                 "{{ contrail_instances.instances[0].id }}"
+        public_ip:          "{{ contrail_instances.instances[0].public_ip }}"
+        private_ip:         "{{ contrail_instances.instances[0].private_ip }}"
+
+# Update Inventory File
+  - name: Add contrail to Invtory File
+    lineinfile:
+      dest:                 "./inventory"
+      insertafter:          '\[contrail_deploy\]'
+      line:                 "{{ item.name }} ansible_ssh_private_key_file=./{{ ssh_keyname }}_{{ aws_region }}_key.pem ansible_ssh_user={{ contrail_user }} ansible_ssh_host={{ item.public_ip }} ansible_ssh_port=22 private_ip={{ item.private_ip }}"
+    with_items: "{{ contrail_host }}"
+
+# Wait for Instace to Start
+- name: Refreshing Inventory
+  hosts: local
+  tasks:
+  - meta: refresh_inventory
+  
+- name: Configure Contrail Deployer Host
+  hosts: contrail_deploy
+  gather_facts: no
+
+  vars:
+    - aws_region:               "{{ hostvars['localhost']['aws_region'] }}"
+    - aws_access_key:       "{{ hostvars['localhost']['aws_access_key'] }}"
+    - aws_secret_key:       "{{ hostvars['localhost']['aws_secret_key'] }}"
+    - jnpr_access_key:      "{{ hostvars['localhost']['jnpr_access_key'] }}"
+    - jnpr_secret_key:      "{{ hostvars['localhost']['jnpr_secret_key'] }}"
+    - jnpr_container_registry:   "{{ hostvars['localhost']['jnpr_container_registry'] }}"
+    - contrail_version_tag:      "{{ hostvars['localhost']['contrail_version_tag'] }}"
+    - aws_bucket:           "{{ hostvars['localhost']['aws_bucket'] }}"
+    - contrail_user:        "{{ hostvars['localhost']['contrail_user'] }}"
+
+  tasks:
+  - name: Wait for port 22 to be ready
+    local_action: wait_for port=22 host="{{ ansible_ssh_host }}"  search_regex=OpenSSH delay=3 timeout=600 sleep=5
+
+  - name: Set Hostname
+    hostname:
+      name:                 "{{ inventory_hostname }}"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Remove Packages
+    yum:
+      name:
+        - python-requests
+        - docker
+        - docker-common
+        - docker-engine
+        - PyYAML
+      state:                "absent"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Add Docker GPG key
+    rpm_key:
+      key:                  "https://download.docker.com/linux/centos/gpg"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Add Docker repository
+    get_url:
+      url:                  "https://download.docker.com/linux/centos/docker-ce.repo"
+      dest:                 "/etc/yum.repos.d/docker-ce.repo"
+      owner:                "root"
+      group:                "root"
+      mode:                 "0644"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Installing Docker-Ce
+    yum:
+      name:                 "docker-ce"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Update All Packages
+    yum: 
+      name:                 "*"
+      state:                "latest"
+      update_cache:         "yes"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Installing Packages
+    yum:
+      name:
+        - git
+        - automake
+        - gcc
+        - gcc-c++
+        - kernel-devel
+        - python-devel
+        - python-setuptools
+        - openssl-devel
+        - libffi-devel
+        - protobuf-compiler
+        - protobuf-devel
+        - epel-release
+        - wget
+        - ntpdate
+        - ntp
+        - bind-utils
+        - firewalld
+        - libselinux-python
+        - telnet
+        - nc
+        - nano
+        - unzip
+        - yum-utils 
+        - device-mapper-persistent-data
+        - lvm2
+        - screen
+#        - kubernetes
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Install Pip
+    easy_install:
+      name: pip
+      state: latest
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Upgrade PIP and Setuptools
+    pip:
+      name:
+        - pip
+        - setuptools
+        - jinja2
+      extra_args:           "--upgrade"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Installing pip modules
+    pip:
+      name:
+        - ansible==2.7.10
+        - setuptools
+        - markupsafe
+        - httplib2
+        - virtualenv
+        - boto3
+        - botocore
+        - python-ironicclient
+        - python-openstackclient
+        - docker-compose
+        - openshift
+        - pycrypto
+      state:                "latest"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Create ntp.conf
+    copy:
+      content: |
+                tinker panic 0
+  
+                disable monitor
+                restrict default kod nomodify notrap nopeer noquery
+                restrict -6 default kod nomodify notrap nopeer noquery
+                restrict 127.0.0.1
+                restrict -6 ::1
+                server 169.254.169.123 iburst
+
+                # Driftfile.
+                driftfile /var/lib/ntp/drift
+      dest: /etc/ntp.conf
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Stop and Disable Chronyd service
+    systemd: 
+      name:                 "chronyd" 
+      state:                "stopped"
+      enabled:              "no"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Stop and Disable Firewalld service
+    systemd: 
+      name:                 "firewalld" 
+      state:                "stopped"
+      enabled:              "no"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Start NTP service
+    systemd: 
+      name:                 "ntpd" 
+      state:                "started"
+      enabled:              "yes"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: "Add the {{ ansible_ssh_user }} to the docker group"
+    user:
+      name:                 "{{ ansible_ssh_user }}"
+      groups:               "docker"
+      append:               "yes"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Enable bridge-netfilter
+    modprobe:
+      name:                 "br_netfilter"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net.bridge.bridge-nf-call-iptables
+    sysctl:
+      name:                 "net.bridge.bridge-nf-call-iptables"
+      value:                "1"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net.bridge.bridge-nf-call-ip6tables
+    sysctl:
+      name:                 "net.bridge.bridge-nf-call-ip6tables"
+      value:                "1"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net.core.rmem_max
+    sysctl:
+      name:                 "net.core.rmem_max"
+      value:                "536870912"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net.core.wmem_max
+    sysctl:
+      name:                 "net.core.wmem_max"
+      value:                "536870912"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net.ipv4.tcp_rmem
+    sysctl:
+      name:                 "net.ipv4.tcp_rmem"
+      value:                "268435456"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net.ipv4.tcp_wmem
+    sysctl:
+      name:                 "net.ipv4.tcp_wmem"
+      value:                "268435456"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl tcp_keepalive_time
+    sysctl:
+      name:                 "net.ipv4.tcp_keepalive_time"
+      value:                "15"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl tcp_keepalive_intvl
+    sysctl:
+      name:                 "net.ipv4.tcp_keepalive_intvl"
+      value:                "15"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl tcp_keepalive_probes
+    sysctl:
+      name:                 "net.ipv4.tcp_keepalive_probes"
+      value:                "5"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl net_core_somaxconn
+    sysctl:
+      name:                 "net.core.somaxconn"
+      value:                "65535"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Updating sysctl vm.overcommit_memory
+    sysctl:
+      name:                 "vm.overcommit_memory"
+      value:                "1"
+      reload:               "yes"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: start docker daemon
+    service:
+      name:                 "docker"
+      state:                "started"
+      enabled:              "yes"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Downloading Contrail Deployer
+    aws_s3:
+      region:               "{{ aws_region }}"
+      aws_access_key:       "{{ aws_access_key }}"
+      aws_secret_key:       "{{ aws_secret_key }}"
+      bucket:               "{{ aws_bucket }}"
+      object:               "{{ item }}"
+      dest:                 "~/{{ item }}"
+      mode:                 "get"
+    with_items:
+#      - < multicloud-deployer >
+
+  - name: Unarchive a file that is already on the remote machine
+    unarchive:
+      src:                  "~/{{ item }}"
+      dest:                 "~/"
+      remote_src:           "yes"
+    with_items:
+#      - < multicloud-deployer >
+
+  - name: Set selinux to permissive
+    selinux:
+      policy:               "targeted"
+      state:                "permissive"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Create Directories
+    file:
+      dest:                 "{{ item }}"
+      state:                "directory"
+      mode:                 "0777"
+    become:                 "yes"
+    become_method:          "sudo"
+    with_items:
+       - "/etc/tuned/no-thp"
+
+  - name: "Tuned Settings"
+    copy:
+      content: |
+                [main]
+                include=virtual-guest
+
+                [vm]
+                transparent_hugepages=never
+      dest: "/etc/tuned/no-thp/tuned.conf"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: "Setting Tuned Profile"
+    shell: >
+      tuned-adm profile no-thp
+    become:                 "yes"
+    become_method:          "sudo"    
+
+  - name: Rebooting to Apply updates
+    reboot:
+      msg:                  "Rebooting To Apply Updates -- Ansible"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Wait for port 22 to be ready
+    local_action: wait_for port=22 host="{{ ansible_ssh_host }}"  search_regex=OpenSSH delay=5 timeout=600 sleep=5
+
+  - name: "Log into JNPR private registry and force re-authorization"
+    docker_login:
+      registry:             "{{ jnpr_container_registry }}"
+      username:             "{{ jnpr_access_key }}"
+      password:             "{{ jnpr_secret_key }}"
+      reauthorize:          "yes"
+
+  - name: "Docker Pull of Multi-Cloud Deployer" 
+    docker_image:
+      name:                 "{{ jnpr_container_registry }}/{{ item }}:{{ contrail_version_tag }}"
+    with_items:
+      - contrail-multicloud-deployer
+      - contrail-command-deployer
+
+  - name: "Run Deployer"
+    shell: "./deployer.sh -r {{ jnpr_container_registry }} -u {{ jnpr_access_key }} -x {{ jnpr_secret_key }} -t {{ contrail_version_tag }}  -a {{ aws_access_key }} -s '{{ aws_secret_key }}'"
+    args:
+      executable:           "/bin/bash"
+      chdir:                "~/contrail-multi-cloud-master"
+    register: deployer_output
+ 
+  - name: "Changing Permissions on Keys dir"
+    file:
+      path:                 "~/contrail-multi-cloud-master/keys"
+      mode:                 "0700"
+
+  - name: "Updating .bash_profile to have ssh-agent on login"
+    lineinfile: 
+      dest:                 "~/.bash_profile"
+      line:                 "eval `ssh-agent -s`"
+      insertafter:          "EOF"
+      state:                "present"
+
+  - name: "Updating /etc/ssh/ssh_conf with ServerAliveInterval"
+    lineinfile: 
+      dest:                 "/etc/ssh/ssh_config"
+      line:                 "ServerAliveInterval 10"
+      insertafter:          "EOF"
+      state:                "present"
+    become:                 "yes"
+    become_method:          "sudo"
+
+
+  - name: "Updating .bash_profile with ssh-add for key on login"
+    find:
+      path:                 "~/contrail-multi-cloud-master/keys"
+      patterns:             "*.pub"
+    register: keys  
+
+  - name: "Updating .bash_profile to have ssh-add on login"
+    lineinfile: 
+      dest:                 "~/.bash_profile"
+      line:                 "ssh-add {{ keys.files[0].path[0:-4] }}"
+      insertafter:          "EOF"
+      state:                "present"
+
+  - name: Generate Random UUID
+    command: uuidgen
+    register: uuid_raw
+
+  - name: Set UUID output value 
+    set_fact:
+      uuid:               "{{ uuid_raw.stdout }}"
+ 
+  - name: "Apply sshd_config settings"
+    lineinfile:
+      path: /etc/ssh/sshd_config
+      # might be commented out, whitespace between key and value
+      regexp: '^#?\s*{{ item.key }}\s'
+      line: "{{ item.key }} {{ item.value }}"
+      validate: '/usr/sbin/sshd -T -f %s'
+    with_items:
+    - key: PermitRootLogin
+      value: "yes"
+    - key: PasswordAuthentication    
+      value: "yes"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: "Restart sshd"
+    service:
+      name:                 "sshd"
+      state:                "restarted"
+      enabled:              "yes"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: "Setting root user password"
+    user:
+      name:                 "root"
+      password:             "{{ uuid | password_hash('sha256', 'contrailjnpr') }}"
+      update_password:      "always"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: "Setting centos user password"
+    user:
+      name:                 "centos"
+      password:             "{{ uuid | password_hash('sha256', 'contrailjnpr') }}"
+      update_password:      "always"
+    become:                 "yes"
+    become_method:          "sudo"
+
+  - name: Create command_servers.yml
+    copy:
+      content: |
+                ---
+                command_servers:
+                    server1:
+                        ip: 127.0.0.1
+                        connection: ssh
+                        ssh_user: root
+                        ssh_pass: {{ uuid }}
+                        sudo_pass: {{ uuid }}
+                        ntpserver: 169.254.169.123
+ 
+                        registry_insecure: false
+                        container_registry: {{ jnpr_container_registry }}
+                        container_tag: {{ contrail_version_tag }}
+                        container_registry_username: {{ jnpr_access_key }}
+                        container_registry_password: {{ jnpr_secret_key }}
+                        config_dir: /etc/contrail
+
+                        contrail_config:
+                            database:
+                                type: postgres
+                                dialect: postgres
+                                password: contrail123
+                            keystone:
+                                assignment:
+                                    data:
+                                      users:
+                                        admin:
+                                          password: contrail123
+                            insecure: true
+                            client:
+                              password: contrail123
+      dest: command_servers.yml
+
+  - name: "Run Contrail Command Deployer"
+    debug:
+       msg "Command to import Contrail Controller to Command: \n docker run -td --net host -e orchestrator=kubernetes -e action=import_cluster -v $PWD/command_servers.yml:/command_servers.yml -v $PWD/topology.yml:/instances.yml --privileged --name contrail_command_deployer {{ jnpr_container_registry }}/contrail-command-deployer:{{ contrail_version_tag }}"
+
+  - name: Ouput from Deployer
+    debug:
+      msg: "{{ deployer_output.stdout }}"
+
+# Print SSH command to Start work
+  - name: How to Connect
+    debug:
+      msg: "ssh -i {{ ansible_ssh_private_key_file }} {{ ansible_ssh_user }}@{{ ansible_ssh_host }}"
